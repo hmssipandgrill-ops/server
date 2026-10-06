@@ -19,7 +19,8 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
-app.use(express.json({ limit: '10mb' }))
+// rawBody is kept for the AYOPOS webhook: its HMAC signature is computed over the exact bytes received.
+app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { if (req.originalUrl.startsWith('/api/integrations/ayopos/')) req.rawBody = buf } }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.use((req, res, next) => { req.io = io; next() })
 
@@ -31,6 +32,7 @@ app.use('/api/analytics', require('./routes/analytics'))
 app.use('/api/contact',   require('./routes/contact'))
 app.use('/api/upload',      require('./routes/upload'))
 app.use('/api/categories', require('./routes/categories'))
+app.use('/api/integrations/ayopos', require('./integrations/ayopos').router)
 
 app.get('/api/health', (req, res) => res.json({
   status: 'ok',
@@ -86,6 +88,7 @@ async function startServer() {
     await autoSeed()
     server.listen(PORT, () => {
       console.log('✓ HMS Server running → http://localhost:' + PORT)
+      require('./integrations/ayopos').startReconciler()
     })
   } catch (error) {
     console.error('\n╔══════════════════════════════════════════════════════════╗')

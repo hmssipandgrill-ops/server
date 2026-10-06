@@ -15,8 +15,15 @@ const menuItemSchema = new mongoose.Schema({
   isActive:    { type: Boolean, default: true },
   prepTime:    { type: Number, default: 15 },
   allergens:   [String],
+  // AYOPOS link (all optional; unused when the site is not connected)
+  ayoposId:    { type: String, default: null, index: { unique: true, sparse: true } },
+  syncedAt:    { type: Date, default: null },   // when this record last matched AYOPOS
 }, { timestamps: true })
 
 menuItemSchema.index({ name: 'text', description: 'text' })
+
+// Keep AYOPOS in step with edits made here. The sync service ignores changes it wrote itself (no echo loops).
+menuItemSchema.post('save', function (doc) { try { require('../integrations/ayopos').onItemSaved(doc) } catch (e) { console.error('[ayopos] hook:', e.message) } })
+menuItemSchema.post('findOneAndDelete', function (doc) { if (doc) try { require('../integrations/ayopos').onItemDeleted(doc) } catch (e) { console.error('[ayopos] hook:', e.message) } })
 
 module.exports = mongoose.model('MenuItem', menuItemSchema)

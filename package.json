@@ -1,13 +1,14 @@
 {
   "name": "hms-lounge-server",
   "version": "1.0.0",
-  "description": "HMS Lounge & Bar — Backend API with real-time Socket.io notifications",
+  "description": "HMS Lounge & Bar \u2014 Backend API with real-time Socket.io notifications",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
     "seed": "node scripts/seed.js",
-    "seed:force": "node scripts/seed.js --force"
+    "seed:force": "node scripts/seed.js --force",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"
