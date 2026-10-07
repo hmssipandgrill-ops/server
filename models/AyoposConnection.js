@@ -14,6 +14,8 @@ const schema = new mongoose.Schema({
   lastSyncAt:        { type: Date, default: null },
   lastError:         { type: String, default: null },
   connectedAt:       { type: Date, default: null },
+  // Connection settings entered by the top admin on the dashboard (see integrations/ayopos/settings.js). Env vars are the fallback.
+  config:            { type: mongoose.Schema.Types.Mixed, default: null },
 }, { timestamps: true })
 
 module.exports = mongoose.model('AyoposConnection', schema)

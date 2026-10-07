@@ -2,7 +2,8 @@
 const { verifyRequest } = require('./signing')
 const { encrypt, decrypt } = require('./secret-box')
 const { postJson } = require('./http')
-const { toCommonProduct, sanitiseIncomingProduct, decideConflict, businessFromEnv } = require('./mapping')
+const { toCommonProduct, sanitiseIncomingProduct, decideConflict } = require('./mapping')
+const { normaliseSettings, effectiveSettings } = require('./settings')
 
 const BATCH = 100
 const DEBOUNCE_MS = 2000
@@ -21,42 +22,71 @@ const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i +=
  *  MenuItem, Category, Processed              — mongoose models (or compatible fakes)
  *  http(url, body, opts)                      — signed POST helper
  */
-function createService({ repo, MenuItem, Category, Processed, env = process.env, http = postJson, log = console }) {
+function createService({ repo, MenuItem, Category, Processed, env = process.env, http = postJson, fetchImpl = fetch, log = console }) {
   const pending = new Map()
   let timer = null
 
-  const apiBase = () => {
-    const b = env.AYOPOS_API_BASE
-    if (!b) throw httpError(500, 'AYOPOS_API_BASE is not set on the server.')
-    return b.replace(/\/+$/, '')
-  }
+  const settingsOf = (c) => effectiveSettings(c.config, env)
   const canPush = (c) => c.status === 'ACTIVE' && c.direction !== 'AYOPOS_TO_SITE'
   const canApply = (c) => c.status === 'ACTIVE' && c.direction !== 'SITE_TO_AYOPOS'
   const inboundUrl = (c, path) => `${c.ayoposApiBase}/integrations/store-sync/${path}/${c.connectionId}`
 
-  async function status() {
+  async function status(extra = {}) {
     const c = await repo.get(false)
     const linked = await MenuItem.countDocuments({ ayoposId: { $ne: null } })
+    const st = settingsOf(c)
     return {
-      configured: !!env.AYOPOS_API_BASE && !!env.PUBLIC_API_URL, status: c.status, connected: c.status !== 'DISCONNECTED',
+      configured: !!st.apiBase && !!st.publicApiUrl, status: c.status, connected: c.status !== 'DISCONNECTED',
       direction: c.direction, conflictPolicy: c.conflictPolicy, ayoposBusinessName: c.ayoposBusinessName, linkedProducts: linked,
       lastSyncAt: c.lastSyncAt, lastError: c.lastError, connectedAt: c.connectedAt,
+      // What the admin typed on the page (or the server's environment fallback). Editable only while disconnected.
+      settings: st, canEditSettings: c.status === 'DISCONNECTED', suggestedPublicApiUrl: extra.suggestedPublicApiUrl || null,
     }
+  }
+
+  /** Top admin only (enforced by the route). Changing the address of a live link would break it, so it needs a disconnect first. */
+  async function saveSettings(input) {
+    const c = await repo.get(false)
+    if (c.status !== 'DISCONNECTED') throw httpError(409, 'Disconnect from AYOPOS before changing the connection settings.')
+    const config = normaliseSettings(input)
+    await repo.update({ config })
+    return status()
+  }
+
+  async function probe(url, validate) {
+    try {
+      const res = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(6000), headers: { accept: 'application/json' } })
+      if (!res.ok) return { ok: false, message: `It answered ${res.status}.` }
+      return validate ? validate(await res.json().catch(() => null)) : { ok: true, message: 'Reachable.' }
+    } catch (e) { return { ok: false, message: e && e.name === 'TimeoutError' ? 'It did not answer in time.' : 'Could not be reached.' } }
+  }
+
+  /** "Check settings": validates what is typed (without saving) and proves both ends can be reached. */
+  async function checkSettings(input) {
+    const settings = input ? normaliseSettings(input) : settingsOf(await repo.get(false))
+    if (!settings.apiBase || !settings.publicApiUrl) throw httpError(400, 'Fill in both addresses first.')
+    const [ayopos, website] = await Promise.all([
+      probe(`${new URL(settings.apiBase).origin}/healthz`).then((r) => ({ ...r, message: r.ok ? 'AYOPOS answered.' : `AYOPOS could not be reached at that address. ${r.message}` })),
+      probe(`${settings.publicApiUrl}/api/integrations/ayopos/whoami`, (j) => (j && j.service === 'hms-ayopos-connector' ? { ok: true, message: 'Reachable from the internet.' } : { ok: false, message: 'That address does not lead back to this website.' }))
+        .then((r) => ({ ...r, message: r.ok ? r.message : `AYOPOS would not be able to reach this website at that address. ${r.message}` })),
+    ])
+    return { ayopos, website, ok: ayopos.ok && website.ok }
   }
 
   async function pair(rawCode) {
     const code = String(rawCode || '').trim().toUpperCase()
     if (!/^[A-Z0-9-]{8,40}$/.test(code)) throw httpError(400, 'That pairing code does not look right.')
-    if (!env.PUBLIC_API_URL) throw httpError(500, 'PUBLIC_API_URL is not set on the server.')
     const existing = await repo.get(false)
     if (existing.status !== 'DISCONNECTED') throw httpError(409, 'This website is already connected. Disconnect first.')
-    const business = businessFromEnv(env)
+    const st = settingsOf(existing)
+    if (!st.apiBase || !st.publicApiUrl) throw httpError(400, 'Save the connection settings first (the AYOPOS address and this website’s address).')
+    const business = st.business
     let res
     try {
       // attempts:1 — the code is single-use, so a blind retry after a timeout would only fail with "already used".
-      res = await http(`${apiBase()}/integrations/store-sync/pair`, {
-        pairingCode: code, connectorVersion: '1.0.0', site: { url: env.SITE_URL || null, name: business.name }, business,
-        webhookUrl: `${env.PUBLIC_API_URL.replace(/\/+$/, '')}/api/integrations/ayopos/webhook`, productCount: await MenuItem.countDocuments({}),
+      res = await http(`${st.apiBase}/integrations/store-sync/pair`, {
+        pairingCode: code, connectorVersion: '1.0.0', site: { url: st.siteUrl || null, name: business.name }, business,
+        webhookUrl: `${st.publicApiUrl}/api/integrations/ayopos/webhook`, productCount: await MenuItem.countDocuments({}),
       }, { attempts: 1 })
     } catch (e) { throw httpError(e.status && e.status < 500 ? 400 : 502, e.status && e.status < 500 ? e.message : 'Could not reach AYOPOS. Try again in a moment.') }
     if (!res || typeof res.connectionId !== 'string' || typeof res.signingSecret !== 'string' || res.signingSecret.length < 32 || !DIRECTIONS.includes(res.direction) || !POLICIES.includes(res.conflictPolicy)) {
@@ -64,7 +94,7 @@ function createService({ repo, MenuItem, Category, Processed, env = process.env,
     }
     await repo.update({
       status: 'ACTIVE', connectionId: res.connectionId, secretEnc: encrypt(res.signingSecret), direction: res.direction, conflictPolicy: res.conflictPolicy,
-      ayoposApiBase: apiBase(), ayoposBusinessName: typeof res.businessName === 'string' ? res.businessName.slice(0, 120) : null, connectedAt: new Date(), lastError: null,
+      ayoposApiBase: st.apiBase, ayoposBusinessName: typeof res.businessName === 'string' ? res.businessName.slice(0, 120) : null, connectedAt: new Date(), lastError: null,
     })
     if (res.direction !== 'AYOPOS_TO_SITE') setImmediate(() => pushAll().catch((e) => log.error('[ayopos] initial sync failed:', e.message)))
     return status()
@@ -87,8 +117,8 @@ function createService({ repo, MenuItem, Category, Processed, env = process.env,
     const items = await MenuItem.find(filter).sort({ _id: 1 })
     let sent = 0
     try {
-      for (const group of chunk(items, BATCH)) { await sendProducts(c, group, businessFromEnv(env)); sent += group.length }
-      if (items.length === 0 && !sinceOnly) await sendProducts(c, [], businessFromEnv(env))
+      for (const group of chunk(items, BATCH)) { await sendProducts(c, group, settingsOf(c).business); sent += group.length }
+      if (items.length === 0 && !sinceOnly) await sendProducts(c, [], settingsOf(c).business)
       await repo.update({ lastSyncAt: new Date(), lastError: null })
     } catch (e) { await repo.update({ lastError: String(e.message).slice(0, 300) }); throw e }
     return { sent }
@@ -107,7 +137,6 @@ function createService({ repo, MenuItem, Category, Processed, env = process.env,
 
   // ---- change queue (debounced; flushed in batches; retried with backoff) ----
   function enqueue(op) {
-    if (!env.AYOPOS_API_BASE) return
     if (op.kind === 'delete') pending.delete(`u:${op.id}`)
     pending.set(`${op.kind === 'delete' ? 'd' : 'u'}:${op.id}`, { attempts: 0, ...op })
     if (!timer) { timer = setTimeout(() => { timer = null; flush().catch((e) => log.error('[ayopos] flush:', e.message)) }, DEBOUNCE_MS); timer.unref?.() }
@@ -193,7 +222,7 @@ function createService({ repo, MenuItem, Category, Processed, env = process.env,
       if (!p.ayoposId) return { rejected: 'unknown_product' }
       await ensureCategory(p.category)
       // New products from outside arrive HIDDEN unless you opt in, so nothing appears on your public menu unreviewed.
-      const publish = env.AYOPOS_AUTO_PUBLISH === 'true' && p.isActive === true
+      const publish = settingsOf(c).autoPublish && p.isActive === true
       const doc = new MenuItem({ name: p.name, category: p.category, description: p.description || '', basePrice: p.price, image: p.imageUrl || '', isActive: publish, ayoposId: p.ayoposId })
       doc.$locals.skipAyopos = true
       await doc.save()
@@ -232,7 +261,7 @@ function createService({ repo, MenuItem, Category, Processed, env = process.env,
   const onItemSaved = (doc) => { if (!doc.$locals?.skipAyopos) enqueue({ kind: 'upsert', id: String(doc._id) }) }
   const onItemDeleted = (doc) => enqueue({ kind: 'delete', id: String(doc._id), ayoposId: doc.ayoposId || undefined })
 
-  return { status, pair, disconnect, pushAll, enqueue, flush, handleWebhook, applyProduct, onItemSaved, onItemDeleted, _pending: pending }
+  return { status, saveSettings, checkSettings, pair, disconnect, pushAll, enqueue, flush, handleWebhook, applyProduct, onItemSaved, onItemDeleted, _pending: pending }
 }
 
 module.exports = { createService, httpError }
