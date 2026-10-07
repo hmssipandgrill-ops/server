@@ -126,7 +126,7 @@ function createService({ repo, MenuItem, Category, Processed, env = process.env,
 
   async function sendProducts(c, items, business) {
     const secret = decrypt(c.secretEnc)
-    const res = await http(inboundUrl(c, 'inbound'), { type: 'products.upsert', products: items.map((i) => toCommonProduct(i)), ...(business ? { business } : {}) }, { secret, connectionId: c.connectionId })
+    const res = await http(inboundUrl(c, 'inbound'), { type: 'products.upsert', products: items.map((i) => toCommonProduct(i, { siteUrl: settingsOf(c).siteUrl })), ...(business ? { business } : {}) }, { secret, connectionId: c.connectionId })
     const pushedAt = new Map(items.map((i) => [String(i._id), i.updatedAt]))
     for (const m of Array.isArray(res.mappings) ? res.mappings : []) {
       if (!pushedAt.has(String(m.externalId)) || typeof m.ayoposId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(m.ayoposId)) continue

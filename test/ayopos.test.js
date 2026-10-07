@@ -40,7 +40,7 @@ test('secret box encrypts, decrypts, detects tampering', () => {
 test('common product exposes only the shared fields', () => {
   const p = toCommonProduct({ _id: 'a'.repeat(24), name: ' Jollof ', description: 'd', basePrice: 0, sizes: [{ label: 'S', price: 1500 }, { label: 'L', price: 900 }], image: 'http://insecure/x.png', category: 'Mains', isActive: true, updatedAt: new Date('2026-01-01'), prepTime: 20, allergens: ['nuts'], isPopular: true })
   assert.deepEqual(Object.keys(p).sort(), ['category', 'currency', 'description', 'externalId', 'imageUrl', 'isActive', 'name', 'price', 'updatedAt'])
-  assert.equal(p.price, 900); assert.equal(p.imageUrl, ''); assert.equal(p.name, 'Jollof')
+  assert.equal(p.price, 900); assert.equal(p.imageUrl, 'https://insecure/x.png'); assert.equal(p.name, 'Jollof')   // http:// is upgraded: AYOPOS is https, so an http picture would be blocked
 })
 test('incoming product is allow-listed and validated', () => {
   const ok = sanitiseIncomingProduct({ ayoposId: 'prd_1', name: 'X', price: '12.345', isActive: 'yes', updatedAt: '2026-02-01T00:00:00Z', evil: '$where', imageUrl: 'javascript:alert(1)' })
